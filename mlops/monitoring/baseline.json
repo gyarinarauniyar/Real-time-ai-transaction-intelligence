@@ -1,0 +1,113 @@
+{
+    "source_file": "C:\\Users\\KIIT\\real-time-ai-transaction-intelligence\\data\\processed\\transactions_features.csv",
+    "row_count": 10219,
+    "numeric": {
+        "amount": {
+            "mean": 1828.3758753302673,
+            "std": 2706.5992904882837,
+            "min": 10.0,
+            "max": 83538.3
+        },
+        "amount_deviation": {
+            "mean": 9.17146113227083,
+            "std": 2768.6147120575706,
+            "min": -51114.53999999999,
+            "max": 80827.23333333334
+        },
+        "amount_to_customer_avg_ratio": {
+            "mean": 1.051245246340002,
+            "std": 2.418580555262637,
+            "min": 0.0,
+            "max": 122.554
+        },
+        "amount_above_customer_avg_ratio": {
+            "mean": 0.3004391526871499,
+            "std": 2.364380104256996,
+            "min": 0.0,
+            "max": 121.554
+        },
+        "transactions_last_1h": {
+            "mean": 0.046873470985419316,
+            "std": 0.3209504027561866,
+            "min": 0.0,
+            "max": 4.0
+        },
+        "transactions_last_24h": {
+            "mean": 0.15480966826499656,
+            "std": 0.47269245670150783,
+            "min": 0.0,
+            "max": 5.0
+        },
+        "minutes_since_previous_transaction": {
+            "mean": 10089.991290732949,
+            "std": 11173.406502214379,
+            "min": 0.0,
+            "max": 105952.0
+        },
+        "hour": {
+            "mean": 11.509834621782954,
+            "std": 6.93612160324063,
+            "min": 0.0,
+            "max": 23.0
+        },
+        "customer_hour_frequency": {
+            "mean": 0.04386888322124983,
+            "std": 0.1219444648948771,
+            "min": 0.0,
+            "max": 1.0
+        },
+        "customer_location_frequency": {
+            "mean": 0.5579400843026248,
+            "std": 0.3995564111976302,
+            "min": 0.0,
+            "max": 1.0
+        },
+        "customer_transaction_count": {
+            "mean": 5.144045405616988,
+            "std": 3.7768541981223884,
+            "min": 0.0,
+            "max": 22.0
+        },
+        "merchant_transaction_count": {
+            "mean": 25.587630883648107,
+            "std": 15.64497820941895,
+            "min": 0.0,
+            "max": 68.0
+        }
+    },
+    "categorical": {
+        "payment_method": {
+            "debit_card": 0.25472159702514924,
+            "upi": 0.2541344554261669,
+            "digital_wallet": 0.24885018103532636,
+            "credit_card": 0.24229376651335746
+        },
+        "merchant_category": {
+            "healthcare": 0.10519620315099325,
+            "fuel": 0.10402191995302867,
+            "electronics": 0.10206478128975438,
+            "entertainment": 0.10196692435659066,
+            "fashion": 0.10069478422546238,
+            "online_services": 0.10069478422546238,
+            "grocery": 0.09873764556218809,
+            "utilities": 0.09678050689891379,
+            "travel": 0.09521479596829435,
+            "restaurant": 0.09462765436931207
+        },
+        "location": {
+            "Pune": 0.13533613856541735,
+            "Chennai": 0.1302475780409042,
+            "Bangalore": 0.12740972697915648,
+            "Hyderabad": 0.12466973285057247,
+            "Kolkata": 0.1242783051179176,
+            "Delhi": 0.12398473431842646,
+            "Ahmedabad": 0.11938545845973188,
+            "Mumbai": 0.11468832566787357
+        },
+        "device_type": {
+            "mobile": 0.3346707114199041,
+            "desktop": 0.3333007143556121,
+            "tablet": 0.3320285742244838
+        }
+    }
+}
