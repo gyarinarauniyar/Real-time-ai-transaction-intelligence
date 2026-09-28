@@ -1,27 +1,37 @@
+import re
 import requests
 
 from .config import OLLAMA_URL, MODEL_NAME
 from .database import execute_query
 from .sql_generator import (
     generate_sql,
-    generate_transaction_sql
+    generate_transaction_sql,
+    extract_transaction_id
 )
+
 from ai_analyst.rag_context import get_relevant_context
 from ai_analyst.sql_validator import validate_sql
 
 
+# ============================================================
+# QUESTION CLASSIFICATION
+# ============================================================
+
 def classify_question(question):
     """
-    Classify the user question into:
-    - knowledge
-    - data
-    - hybrid
+    Classify the question into:
 
-    Deterministic rules are used first for common platform
-    questions, then Ollama handles ambiguous questions.
+        knowledge
+        data
+        hybrid
+
+    Deterministic routing is preferred.
+    Ollama is used only for genuinely ambiguous questions.
     """
 
     q = question.lower().strip()
+
+    transaction_id = extract_transaction_id(question)
 
     # --------------------------------------------------
     # KNOWLEDGE QUESTIONS
@@ -35,13 +45,13 @@ def classify_question(question):
         "how does isolation forest",
         "what is isolation forest",
         "what is anomaly detection",
-        "why is a transaction classified",
-        "why was a transaction classified",
-        "why is this transaction classified",
-        "why was this transaction classified",
-        "why high risk",
-        "why is high risk",
-        "what makes a transaction high risk",
+        "how does anomaly detection work",
+        "how does the platform detect",
+        "how does the platform detect unusual",
+        "how does the system detect",
+        "how are unusual transactions detected",
+        "how are anomalies detected",
+        "why does the platform detect",
         "how is risk calculated",
         "how is risk score calculated",
         "what are the risk rules",
@@ -54,6 +64,18 @@ def classify_question(question):
         "what is data drift",
         "what is the production model",
         "how does the system work",
+        "how does the platform work",
+        "what is rag",
+        "how does rag work",
+        "how does mlops work",
+        "what is mlops",
+        "what is the ai analyst",
+        "how does the ai analyst work",
+        "what is the architecture",
+        "how does the architecture work",
+        "what is data quality",
+        "how is data quality checked",
+        "how does the pipeline work",
     ]
 
     for pattern in knowledge_patterns:
@@ -61,18 +83,35 @@ def classify_question(question):
             return "knowledge"
 
     # --------------------------------------------------
-    # HYBRID QUESTIONS
+    # TRANSACTION-SPECIFIC QUESTIONS
     # --------------------------------------------------
 
     hybrid_patterns = [
         "why was",
         "why is",
+        "why did",
         "explain this transaction",
         "explain the transaction",
-        "why did this transaction",
         "what caused this transaction",
-        "why did this become",
+        "why was this transaction",
+        "why is this transaction",
+        "why did this transaction",
+        "explain this",
     ]
+
+    if transaction_id:
+
+        for pattern in hybrid_patterns:
+            if pattern in q:
+                return "hybrid"
+
+        # Any direct transaction-ID question requires
+        # actual database information.
+        return "hybrid"
+
+    # --------------------------------------------------
+    # DATA QUESTIONS
+    # --------------------------------------------------
 
     data_patterns = [
         "how many",
@@ -85,6 +124,7 @@ def classify_question(question):
         "highest",
         "lowest",
         "show me",
+        "show",
         "list",
         "transactions",
         "transaction records",
@@ -94,25 +134,11 @@ def classify_question(question):
         "yesterday",
         "this week",
         "this month",
+        "by location",
+        "by payment",
+        "by merchant",
+        "by category",
     ]
-
-    # A "why" question involving a specific transaction
-    # should use both database data and project knowledge.
-    for pattern in hybrid_patterns:
-        if pattern in q:
-            for data_pattern in data_patterns:
-                if data_pattern in q:
-                    return "hybrid"
-
-    # Explicit transaction ID → hybrid
-    if "txn_" in q:
-        for pattern in hybrid_patterns:
-            if pattern in q:
-                return "hybrid"
-
-    # --------------------------------------------------
-    # DATA QUESTIONS
-    # --------------------------------------------------
 
     for pattern in data_patterns:
         if pattern in q:
@@ -128,80 +154,80 @@ You are an intent classifier for a transaction intelligence platform.
 Classify the user's question into exactly ONE category:
 
 KNOWLEDGE
-Questions about:
-- model features
-- model behavior
-- anomaly detection
-- risk rules
-- risk scoring
-- monitoring
-- data quality
-- definitions
-- project architecture
-- how the system works
-
 DATA
-Questions requiring PostgreSQL transaction data:
-- counts
-- totals
-- averages
-- transaction records
-- transaction statistics
-- dates
-- locations
-- payment methods
-- database information
-
 HYBRID
-Questions requiring BOTH:
-- actual transaction data
-AND
-- project/model/risk-rule knowledge
+
+KNOWLEDGE:
+Questions about how the platform works, anomaly detection,
+risk scoring, model behavior, MLOps, RAG, architecture,
+data quality, or definitions.
+
+DATA:
+Questions asking for actual transaction/database statistics,
+counts, averages, totals, records, dates, locations,
+payment methods, or categories.
+
+HYBRID:
+Questions about a specific transaction that require both
+database facts and project knowledge.
 
 USER QUESTION:
 {question}
 
-Return ONLY one word:
+Return only:
 KNOWLEDGE
 DATA
 or
 HYBRID
 """
 
-    response = requests.post(
-        OLLAMA_URL,
-        json={
-            "model": MODEL_NAME,
-            "prompt": prompt,
-            "stream": False,
-            "options": {
-                "temperature": 0,
-                "num_predict": 10
-            }
-        },
-        timeout=60
-    )
+    try:
 
-    response.raise_for_status()
+        response = requests.post(
+            OLLAMA_URL,
+            json={
+                "model": MODEL_NAME,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0,
+                    "num_predict": 5
+                }
+            },
+            timeout=30
+        )
 
-    intent = response.json()["response"].strip().upper()
+        response.raise_for_status()
 
-    if "HYBRID" in intent:
-        return "hybrid"
+        intent = response.json()["response"].strip().upper()
 
-    if "DATA" in intent:
-        return "data"
+        if "HYBRID" in intent:
+            return "hybrid"
 
-    return "knowledge"
+        if "DATA" in intent:
+            return "data"
 
+        return "knowledge"
+
+    except Exception:
+
+        # Safe fallback.
+        return "knowledge"
+
+
+# ============================================================
+# RESULT FORMATTING
+# ============================================================
 
 def format_results(columns, rows):
+
     if not rows:
         return "No matching records were found."
 
     output = []
 
     for row in rows:
+
         record = {}
 
         for column, value in zip(columns, row):
@@ -212,9 +238,17 @@ def format_results(columns, rows):
     return output
 
 
-def generate_knowledge_answer(question, knowledge_context):
+# ============================================================
+# KNOWLEDGE ANSWER
+# ============================================================
+
+def generate_knowledge_answer(
+    question,
+    knowledge_context
+):
     """
     Answer documentation/model questions using RAG context.
+
     No database query is performed.
     """
 
@@ -232,15 +266,15 @@ USER QUESTION:
 {question}
 
 Rules:
+
 - Do not invent facts.
-- Do not use general knowledge that is not supported
-  by the project knowledge.
+- Do not use unsupported general knowledge.
 - Do not create database statistics.
-- Do not make business recommendations unless the
-  project knowledge supports them.
-- If the project knowledge does not contain enough
-  information, say so clearly.
-- Be concise and factual.
+- Do not invent implementation details.
+- If the project knowledge does not contain enough information,
+  say so clearly.
+- Keep the answer concise and factual.
+- Explain the platform in practical terms.
 
 Answer:
 """
@@ -253,16 +287,20 @@ Answer:
             "stream": False,
             "options": {
                 "temperature": 0.1,
-                "num_predict": 256
+                "num_predict": 180
             }
         },
-        timeout=180
+        timeout=120
     )
 
     response.raise_for_status()
 
     return response.json()["response"].strip()
 
+
+# ============================================================
+# DATABASE ANSWER
+# ============================================================
 
 def generate_explanation(
     question,
@@ -271,41 +309,100 @@ def generate_explanation(
     knowledge_context
 ):
     """
-    Explain database results using database output
-    and relevant project knowledge.
+    Convert verified database results into a concise user-facing answer.
+
+    Simple aggregate results are formatted deterministically.
+    More complex results can still use Ollama for summarization.
     """
 
+    # --------------------------------------------------
+    # No results
+    # --------------------------------------------------
+
+    if not results or results == "No matching records were found.":
+        return "No matching records were found."
+
+    # --------------------------------------------------
+    # Simple aggregate results
+    # --------------------------------------------------
+
+    if isinstance(results, list) and len(results) == 1:
+        record = results[0]
+
+        if "transaction_count" in record:
+            return (
+                f"There are {record['transaction_count']} transactions "
+                "in the current transaction event stream."
+            )
+
+        if "anomaly_count" in record:
+            return (
+                f"There are {record['anomaly_count']} transactions "
+                "currently flagged as anomalies."
+            )
+
+        if "high_risk_count" in record:
+            return (
+                f"There are {record['high_risk_count']} high-risk "
+                "transactions."
+            )
+
+        if "critical_count" in record:
+            return (
+                f"There are {record['critical_count']} critical-risk "
+                "transactions."
+            )
+
+        if "average_transaction_amount" in record:
+            value = record["average_transaction_amount"]
+
+            if value is not None:
+                return (
+                    f"The average transaction amount is "
+                    f"{float(value):.2f}."
+                )
+
+        if "total_transaction_amount" in record:
+            value = record["total_transaction_amount"]
+
+            if value is not None:
+                return (
+                    f"The total transaction amount is "
+                    f"{float(value):.2f}."
+                )
+
+    # --------------------------------------------------
+    # Complex results
+    # --------------------------------------------------
+
     prompt = f"""
-You are the AI Analyst for a
-Real-Time AI Transaction Intelligence Platform.
+You are the AI Analyst for a Real-Time AI Transaction Intelligence Platform.
 
-Answer the user's question using:
-
-1. The PostgreSQL query result.
-2. The project knowledge provided below.
-
-PROJECT KNOWLEDGE:
-{knowledge_context}
+Answer the user's question using ONLY the verified database result below.
 
 USER QUESTION:
 {question}
 
-SQL USED:
-{sql}
-
-DATABASE RESULT:
+VERIFIED DATABASE RESULT:
 {results}
 
+PROJECT KNOWLEDGE:
+{knowledge_context}
+
 Rules:
-- Do not invent statistics.
-- Do not claim information that is not present
-  in the database result.
-- Do not invent trends from a small sample.
-- Do not claim that a transaction is fraudulent
-  unless the database explicitly provides such a label.
-- If the database result does not contain enough
-  information, say so clearly.
-- Keep the answer concise and business-oriented.
+
+- Treat the database result as the only source of transaction facts.
+- Do not invent statistics or transaction attributes.
+- Do not mention SQL.
+- Do not mention PostgreSQL.
+- Do not mention "source of truth".
+- Do not mention prompts, models, AI rules, or internal processing.
+- Do not repeat the raw Python/database result.
+- Do not claim fraud unless explicitly present in the data.
+- Keep the answer concise and natural.
+- Answer the user's question directly.
+
+Return ONLY the final user-facing answer.
 
 Answer:
 """
@@ -317,18 +414,16 @@ Answer:
             "prompt": prompt,
             "stream": False,
             "options": {
-                "temperature": 0.1,
-                "num_predict": 256
+                "temperature": 0,
+                "num_predict": 120
             }
         },
-        timeout=180
+        timeout=120
     )
 
     response.raise_for_status()
 
     return response.json()["response"].strip()
-
-
 def generate_hybrid_answer(
     question,
     sql,
@@ -336,94 +431,186 @@ def generate_hybrid_answer(
     knowledge_context
 ):
     """
-    Explain a specific transaction using:
-    - actual PostgreSQL transaction data
-    - retrieved project knowledge
+    Explain a specific transaction using verified database facts.
+
+    Transaction risk and anomaly status are formatted deterministically
+    from the database. No LLM is used to reinterpret these facts.
     """
 
-    prompt = f"""
-You are the AI Analyst for a
-Real-Time AI Transaction Intelligence Platform.
+    # --------------------------------------------------
+    # No database record
+    # --------------------------------------------------
 
-The user wants an explanation of a transaction's risk.
+    if (
+        not results
+        or results == "No matching records were found."
+    ):
+        transaction_id = extract_transaction_id(question)
 
-Use BOTH:
+        return (
+            f"No transaction record was found for "
+            f"{transaction_id}. "
+            "I cannot determine its risk level or anomaly status "
+            "without a corresponding database record."
+        )
 
-1. ACTUAL DATABASE RESULT
-2. PROJECT KNOWLEDGE
+    # --------------------------------------------------
+    # Extract verified transaction facts
+    # --------------------------------------------------
 
-PROJECT KNOWLEDGE:
-{knowledge_context}
+    if not isinstance(results, list) or not results:
+        return "No matching transaction record was found."
 
-USER QUESTION:
-{question}
+    verified = results[0]
 
-SQL USED:
-{sql}
+    transaction_id = verified.get("transaction_id")
+    risk_score = verified.get("risk_score")
+    risk_level = verified.get("risk_level")
+    anomaly_prediction = verified.get("anomaly_prediction")
+    is_anomaly = verified.get("is_anomaly")
 
-ACTUAL DATABASE RESULT:
-{results}
+    # --------------------------------------------------
+    # Normalize values
+    # --------------------------------------------------
 
-Rules:
+    try:
+        if risk_score is not None:
+            risk_score = float(risk_score)
+    except (TypeError, ValueError):
+        pass
 
-- Use only facts present in the database result.
-- Use the project knowledge to explain risk rules
-  and model behavior.
-- Do not invent transaction attributes.
-- Do not invent risk factors.
-- Do not claim fraud unless the database explicitly
-  provides a fraud label.
-- Explain which available risk signals or rules
-  are relevant.
-- If the available information is insufficient
-  to determine the exact reason, clearly say so.
-- Do not confuse an anomaly signal with proof of fraud.
-- Keep the answer concise and business-oriented.
+    if risk_level is not None:
+        risk_level = str(risk_level).lower()
 
-Answer:
-"""
+    try:
+        if anomaly_prediction is not None:
+            anomaly_prediction = int(anomaly_prediction)
+    except (TypeError, ValueError):
+        pass
 
-    response = requests.post(
-        OLLAMA_URL,
-        json={
-            "model": MODEL_NAME,
-            "prompt": prompt,
-            "stream": False,
-            "options": {
-                "temperature": 0.1,
-                "num_predict": 300
-            }
-        },
-        timeout=180
+    try:
+        if is_anomaly is not None:
+            is_anomaly = int(is_anomaly)
+    except (TypeError, ValueError):
+        pass
+
+    # --------------------------------------------------
+    # Build risk statement
+    # --------------------------------------------------
+
+    if risk_level is not None and risk_score is not None:
+        risk_statement = (
+            f"{transaction_id} is classified as "
+            f"{risk_level} risk with a risk score of "
+            f"{risk_score:.2f}."
+        )
+
+    elif risk_level is not None:
+        risk_statement = (
+            f"{transaction_id} is classified as "
+            f"{risk_level} risk."
+        )
+
+    elif risk_score is not None:
+        risk_statement = (
+            f"{transaction_id} has a risk score of "
+            f"{risk_score:.2f}."
+        )
+
+    else:
+        risk_statement = (
+            f"The risk classification for {transaction_id} "
+            "is unavailable."
+        )
+
+    # --------------------------------------------------
+    # Build anomaly statement
+    # --------------------------------------------------
+
+    if anomaly_prediction == -1:
+        anomaly_statement = (
+            "The Isolation Forest classified the transaction "
+            "as an anomaly."
+        )
+
+    elif anomaly_prediction == 1:
+        anomaly_statement = (
+            "The Isolation Forest did not classify the "
+            "transaction as an anomaly."
+        )
+
+    else:
+        anomaly_statement = (
+            "The anomaly prediction is unavailable."
+        )
+
+    # --------------------------------------------------
+    # Build explicit anomaly flag statement
+    # --------------------------------------------------
+
+    if is_anomaly == 1:
+        flag_statement = (
+            "The transaction is explicitly flagged as an anomaly."
+        )
+
+    elif is_anomaly == 0:
+        flag_statement = (
+            "The transaction is not explicitly flagged as an anomaly."
+        )
+
+    else:
+        flag_statement = (
+            "The anomaly flag is unavailable."
+        )
+
+    # --------------------------------------------------
+    # Correct incorrect user assumptions
+    # --------------------------------------------------
+
+    correction = ""
+
+    if (
+        "high risk" in question.lower()
+        and risk_level is not None
+        and risk_level != "high"
+    ):
+        correction = (
+            f"{transaction_id} is not classified as high risk. "
+        )
+
+    # --------------------------------------------------
+    # Final response
+    # --------------------------------------------------
+
+    return (
+        f"{correction}"
+        f"{risk_statement} "
+        f"{anomaly_statement} "
+        f"{flag_statement}"
     )
-
-    response.raise_for_status()
-
-    return response.json()["response"].strip()
-
-
 def analyze(question):
 
-    # --------------------------------------------------
-    # STEP 1 — Retrieve relevant project knowledge
-    # --------------------------------------------------
+    question = question.strip()
 
-    knowledge_context = get_relevant_context(
-        question,
-        top_k=3
-    )
+    if not question:
+        raise ValueError("Please enter a question.")
 
     # --------------------------------------------------
-    # STEP 2 — Determine question intent
+    # STEP 1 — Determine intent FIRST
     # --------------------------------------------------
 
     intent = classify_question(question)
 
     # --------------------------------------------------
-    # STEP 3 — Knowledge question
+    # STEP 2 — Knowledge question
     # --------------------------------------------------
 
     if intent == "knowledge":
+
+        knowledge_context = get_relevant_context(
+            question,
+            top_k=3
+        )
 
         explanation = generate_knowledge_answer(
             question,
@@ -440,14 +627,18 @@ def analyze(question):
         }
 
     # --------------------------------------------------
-    # STEP 4 — Hybrid question
+    # STEP 3 — Hybrid transaction question
     # --------------------------------------------------
 
     if intent == "hybrid":
 
+        knowledge_context = get_relevant_context(
+            question,
+            top_k=3
+        )
+
         sql = generate_transaction_sql(question)
 
-        # Validate LLM-generated SQL before execution
         validate_sql(sql)
 
         columns, rows = execute_query(sql)
@@ -456,6 +647,14 @@ def analyze(question):
             columns,
             rows
         )
+
+        # --------------------------------------------------
+        # IMPORTANT:
+        # If the transaction does not exist, return the
+        # deterministic response from generate_hybrid_answer.
+        #
+        # Ollama will NOT be called in this case.
+        # --------------------------------------------------
 
         explanation = generate_hybrid_answer(
             question,
@@ -474,33 +673,43 @@ def analyze(question):
         }
 
     # --------------------------------------------------
-    # STEP 5 — Data question
+    # STEP 4 — Data question
     # --------------------------------------------------
 
-    sql = generate_sql(question)
+    if intent == "data":
 
-    # Validate LLM-generated SQL before execution
-    validate_sql(sql)
+        knowledge_context = get_relevant_context(
+            question,
+            top_k=2
+        )
 
-    columns, rows = execute_query(sql)
+        sql = generate_sql(question)
 
-    results = format_results(
-        columns,
-        rows
+        validate_sql(sql)
+
+        columns, rows = execute_query(sql)
+
+        results = format_results(
+            columns,
+            rows
+        )
+
+        explanation = generate_explanation(
+            question,
+            sql,
+            results,
+            knowledge_context
+        )
+
+        return {
+            "question": question,
+            "intent": intent,
+            "sql": sql,
+            "results": results,
+            "explanation": explanation,
+            "knowledge_context": knowledge_context
+        }
+
+    raise ValueError(
+        f"Unsupported intent: {intent}"
     )
-
-    explanation = generate_explanation(
-        question,
-        sql,
-        results,
-        knowledge_context
-    )
-
-    return {
-        "question": question,
-        "intent": intent,
-        "sql": sql,
-        "results": results,
-        "explanation": explanation,
-        "knowledge_context": knowledge_context
-    }

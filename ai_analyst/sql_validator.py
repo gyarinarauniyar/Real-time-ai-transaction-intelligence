@@ -1,10 +1,20 @@
 import re
 
 
+# ============================================================
+# ALLOWED PROJECT TABLES
+# ============================================================
+
 ALLOWED_TABLES = {
+    "streaming.transaction_events",
     "streaming.transaction_risk_events",
     "streaming.event_queue",
 }
+
+
+# ============================================================
+# FORBIDDEN SQL OPERATIONS
+# ============================================================
 
 FORBIDDEN_KEYWORDS = [
     "INSERT",
@@ -19,9 +29,16 @@ FORBIDDEN_KEYWORDS = [
 ]
 
 
+# ============================================================
+# SQL VALIDATOR
+# ============================================================
+
 def validate_sql(sql):
     """
-    Validate LLM-generated SQL before execution.
+    Validate SQL before execution.
+
+    Only SELECT queries against approved project tables
+    are allowed.
 
     Returns:
         True if SQL passes validation.
@@ -31,7 +48,9 @@ def validate_sql(sql):
     """
 
     if not sql:
-        raise ValueError("Generated SQL is empty.")
+        raise ValueError(
+            "Generated SQL is empty."
+        )
 
     sql = sql.strip()
 
@@ -40,6 +59,7 @@ def validate_sql(sql):
     # --------------------------------------------------
 
     if not sql.upper().startswith("SELECT"):
+
         raise ValueError(
             "Only SELECT statements are allowed."
         )
@@ -48,13 +68,16 @@ def validate_sql(sql):
     # 2. Remove trailing semicolon
     # --------------------------------------------------
 
-    sql_without_semicolon = sql.rstrip(";").strip()
+    sql_without_semicolon = (
+        sql.rstrip(";").strip()
+    )
 
     # --------------------------------------------------
     # 3. Prevent multiple SQL statements
     # --------------------------------------------------
 
     if ";" in sql_without_semicolon:
+
         raise ValueError(
             "Multiple SQL statements are not allowed."
         )
@@ -69,19 +92,22 @@ def validate_sql(sql):
 
         pattern = rf"\b{re.escape(keyword)}\b"
 
-        if re.search(pattern, upper_sql):
+        if re.search(
+            pattern,
+            upper_sql
+        ):
 
             raise ValueError(
                 f"Forbidden SQL keyword detected: {keyword}"
             )
 
     # --------------------------------------------------
-    # 5. Require known project tables
+    # 5. Require an approved project table
     # --------------------------------------------------
 
     normalized_sql = re.sub(
-        r'\s+',
-        ' ',
+        r"\s+",
+        " ",
         sql.lower()
     )
 
@@ -93,11 +119,12 @@ def validate_sql(sql):
     if not known_table_found:
 
         raise ValueError(
-            "Generated SQL does not reference an allowed project table."
+            "Generated SQL does not reference "
+            "an allowed project table."
         )
 
     # --------------------------------------------------
-    # 6. Block common system/catalog access
+    # 6. Block database system/catalog access
     # --------------------------------------------------
 
     forbidden_sources = [
@@ -113,7 +140,12 @@ def validate_sql(sql):
         if source in normalized_sql:
 
             raise ValueError(
-                f"Access to database system metadata is not allowed: {source}"
+                "Access to database system metadata "
+                f"is not allowed: {source}"
             )
+
+    # --------------------------------------------------
+    # 7. Return successful validation
+    # --------------------------------------------------
 
     return True

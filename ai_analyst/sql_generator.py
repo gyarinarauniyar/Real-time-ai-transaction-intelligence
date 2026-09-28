@@ -1,173 +1,365 @@
-import requests
-
-from .config import OLLAMA_URL, MODEL_NAME
+import re
 
 
-SCHEMA = """
-Database: transaction_intelligence
-
-Schema: streaming
-
-Table: streaming.transaction_risk_events
-Columns:
-- risk_event_id
-- transaction_id
-- anomaly_prediction
-- is_anomaly
-- risk_score
-- risk_level
-- processed_at
-
-Table: streaming.event_queue
-Columns:
-- event_id
-- transaction_id
-- event_payload
-- status
-- created_at
-- processed_at
-- error_message
-
-The event_payload JSONB contains transaction-level information such as:
-- amount
-- customer_id
-- merchant_id
-- merchant_category
-- payment_method
-- device_type
-- location
-- transaction_date
-- hour
-"""
-
-SYSTEM_PROMPT = """
-You are a SQL generation engine for a transaction intelligence platform.
-
-Generate PostgreSQL SQL only.
-
-Rules:
-
-1. Use ONLY tables and columns provided in the schema.
-2. ALWAYS use the complete schema-qualified table name.
-3. For risk questions, use streaming.transaction_risk_events.
-4. For transaction attributes, use streaming.event_queue.
-5. Never modify data.
-6. Never use INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE or CREATE.
-7. Only generate SELECT queries.
-8. Always include a reasonable LIMIT unless the query is an aggregate such as COUNT, SUM, AVG, MIN or MAX.
-9. Return SQL only.
-"""
+TRANSACTION_ID_PATTERN = re.compile(
+    r"\bTXN_[A-Za-z0-9_]+\b",
+    re.IGNORECASE
+)
 
 
-
-def generate_sql(question):
-
-    prompt = f"""
-{SYSTEM_PROMPT}
-
-DATABASE SCHEMA:
-
-{SCHEMA}
-
-USER QUESTION:
-
-{question}
-
-Return only the PostgreSQL SELECT query.
-"""
-
-    response = requests.post(
-        OLLAMA_URL,
-        json={
-            "model": MODEL_NAME,
-            "prompt": prompt,
-            "stream": False,
-            "options": {
-                "temperature": 0,
-                "num_predict": 256
-            }
-        },
-        timeout=180
-    )
-
-    response.raise_for_status()
-
-    sql = response.json()["response"].strip()
-
-    sql = sql.replace("```sql", "")
-    sql = sql.replace("```", "")
-    sql = sql.strip()
-
-    return sql
-
-def generate_transaction_sql(question):
+def extract_transaction_id(question: str):
     """
-    Generate a deterministic SQL query for a specific transaction.
-
-    Only extracts fields needed for risk explanation.
+    Extract a transaction ID from the user's question.
     """
 
-    import re
-
-    match = re.search(
-        r"\bTXN_[A-Za-z0-9_]+\b",
-        question,
-        re.IGNORECASE
-    )
+    match = TRANSACTION_ID_PATTERN.search(question)
 
     if not match:
+        return None
+
+    return match.group(0)
+
+
+def generate_transaction_sql(question: str):
+    """
+    Generate deterministic SQL for a specific transaction.
+
+    Risk information comes from:
+        streaming.transaction_risk_events
+
+    Transaction information comes from:
+        streaming.transaction_events
+
+    The risk table is the primary table so that risk events
+    without matching transaction details are still returned.
+    """
+
+    transaction_id = extract_transaction_id(question)
+
+    if not transaction_id:
         raise ValueError(
             "No transaction ID found. "
             "Please provide a transaction ID such as TXN_VEL_922_2."
         )
 
-    transaction_id = match.group(0).replace("'", "''")
+    transaction_id = transaction_id.replace("'", "''")
 
     sql = f"""
 SELECT
-    t.transaction_id,
-    t.anomaly_prediction,
-    t.is_anomaly,
-    t.risk_score,
-    t.risk_level,
-    t.processed_at,
+    r.transaction_id,
 
-    e.event_payload ->> 'amount' AS amount,
-    e.event_payload ->> 'currency' AS currency,
-    e.event_payload ->> 'customer_id' AS customer_id,
-    e.event_payload ->> 'merchant_id' AS merchant_id,
-    e.event_payload ->> 'merchant_category' AS merchant_category,
-    e.event_payload ->> 'payment_method' AS payment_method,
-    e.event_payload ->> 'device_type' AS device_type,
-    e.event_payload ->> 'location' AS location,
-    e.event_payload ->> 'transaction_date' AS transaction_date,
-    e.event_payload ->> 'hour' AS hour,
-    e.event_payload ->> 'anomaly_type' AS anomaly_type,
+    e.customer_id,
+    e.merchant_id,
+    e.amount,
+    e.currency,
+    e.merchant_category,
+    e.payment_method,
+    e.location,
+    e.device_type,
+    e.timestamp,
+    e.is_injected_anomaly,
+    e.anomaly_type,
 
-    e.event_payload ->> 'amount_deviation' AS amount_deviation,
-    e.event_payload ->> 'amount_to_customer_avg_ratio'
-        AS amount_to_customer_avg_ratio,
-    e.event_payload ->> 'amount_above_customer_avg_ratio'
-        AS amount_above_customer_avg_ratio,
-    e.event_payload ->> 'transactions_last_1h'
-        AS transactions_last_1h,
-    e.event_payload ->> 'transactions_last_24h'
-        AS transactions_last_24h,
-    e.event_payload ->> 'minutes_since_previous_transaction'
-        AS minutes_since_previous_transaction,
-    e.event_payload ->> 'is_unusual_hour'
-        AS is_unusual_hour,
-    e.event_payload ->> 'is_location_changed'
-        AS is_location_changed
+    r.anomaly_prediction,
+    r.is_anomaly,
+    r.risk_score,
+    r.risk_level,
+    r.processed_at
 
-FROM streaming.transaction_risk_events AS t
+FROM streaming.transaction_risk_events AS r
 
-LEFT JOIN streaming.event_queue AS e
-    ON t.transaction_id = e.transaction_id
+LEFT JOIN streaming.transaction_events AS e
+    ON r.transaction_id = e.transaction_id
 
-WHERE t.transaction_id = '{transaction_id}'
+WHERE r.transaction_id = '{transaction_id}'
 
 LIMIT 1
 """.strip()
 
     return sql
+
+
+def generate_sql(question: str):
+    """
+    Generate deterministic SQL for common platform data questions.
+
+    LLM-generated SQL is intentionally avoided so that the model
+    cannot invent tables or columns.
+    """
+
+    q = question.lower().strip()
+
+    # --------------------------------------------------
+    # TOTAL TRANSACTION COUNT
+    # --------------------------------------------------
+
+    if (
+        "how many transactions" in q
+        or "total transactions" in q
+        or "transaction count" in q
+        or "count of transactions" in q
+    ):
+        return """
+SELECT COUNT(*) AS transaction_count
+FROM streaming.transaction_events
+""".strip()
+
+    # --------------------------------------------------
+    # ANOMALY COUNT
+    # --------------------------------------------------
+
+    if (
+        "how many anomalies" in q
+        or "anomaly count" in q
+        or "count of anomalies" in q
+        or "number of anomalies" in q
+    ):
+        return """
+SELECT COUNT(*) AS anomaly_count
+FROM streaming.transaction_risk_events
+WHERE is_anomaly = 1
+""".strip()
+
+    # --------------------------------------------------
+    # HIGH-RISK COUNT
+    # --------------------------------------------------
+
+    if (
+        "how many high risk" in q
+        or "how many high-risk" in q
+        or "high risk transactions" in q
+        or "high-risk transactions" in q
+    ):
+        return """
+SELECT COUNT(*) AS high_risk_count
+FROM streaming.transaction_risk_events
+WHERE risk_level = 'high'
+""".strip()
+
+    # --------------------------------------------------
+    # CRITICAL-RISK COUNT
+    # --------------------------------------------------
+
+    if (
+        "how many critical" in q
+        or "critical transactions" in q
+        or "critical risk" in q
+        or "critical-risk" in q
+    ):
+        return """
+SELECT COUNT(*) AS critical_count
+FROM streaming.transaction_risk_events
+WHERE risk_level = 'critical'
+""".strip()
+
+    # --------------------------------------------------
+    # AVERAGE TRANSACTION AMOUNT
+    # --------------------------------------------------
+
+    if (
+        "average transaction amount" in q
+        or "average amount" in q
+        or "avg transaction amount" in q
+        or "avg amount" in q
+    ):
+        return """
+SELECT ROUND(AVG(amount), 2) AS average_transaction_amount
+FROM streaming.transaction_events
+""".strip()
+
+    # --------------------------------------------------
+    # TOTAL TRANSACTION AMOUNT
+    # --------------------------------------------------
+
+    if (
+        "total transaction amount" in q
+        or "total amount" in q
+        or "sum of transactions" in q
+    ):
+        return """
+SELECT ROUND(SUM(amount), 2) AS total_transaction_amount
+FROM streaming.transaction_events
+""".strip()
+
+    # --------------------------------------------------
+    # LATEST TRANSACTIONS
+    # --------------------------------------------------
+
+    if (
+        "latest transactions" in q
+        or "recent transactions" in q
+        or "show me transactions" in q
+        or "show transactions" in q
+    ):
+        return """
+SELECT
+    e.transaction_id,
+    e.customer_id,
+    e.merchant_id,
+    e.amount,
+    e.currency,
+    e.merchant_category,
+    e.payment_method,
+    e.location,
+    e.device_type,
+    e.timestamp,
+    r.risk_score,
+    r.risk_level,
+    r.is_anomaly
+
+FROM streaming.transaction_events AS e
+
+LEFT JOIN streaming.transaction_risk_events AS r
+    ON e.transaction_id = r.transaction_id
+
+ORDER BY e.timestamp DESC
+
+LIMIT 20
+""".strip()
+
+    # --------------------------------------------------
+    # HIGH-RISK TRANSACTIONS
+    # --------------------------------------------------
+
+    if (
+        "show high risk" in q
+        or "show high-risk" in q
+        or "list high risk" in q
+        or "list high-risk" in q
+    ):
+        return """
+SELECT
+    e.transaction_id,
+    e.customer_id,
+    e.merchant_id,
+    e.amount,
+    e.merchant_category,
+    e.location,
+    r.risk_score,
+    r.risk_level,
+    r.is_anomaly,
+    r.processed_at
+
+FROM streaming.transaction_events AS e
+
+JOIN streaming.transaction_risk_events AS r
+    ON e.transaction_id = r.transaction_id
+
+WHERE r.risk_level = 'high'
+
+ORDER BY r.risk_score DESC
+
+LIMIT 20
+""".strip()
+
+    # --------------------------------------------------
+    # CRITICAL TRANSACTIONS
+    # --------------------------------------------------
+
+    if (
+        "show critical" in q
+        or "list critical" in q
+    ):
+        return """
+SELECT
+    e.transaction_id,
+    e.customer_id,
+    e.merchant_id,
+    e.amount,
+    e.merchant_category,
+    e.location,
+    r.risk_score,
+    r.risk_level,
+    r.is_anomaly,
+    r.processed_at
+
+FROM streaming.transaction_events AS e
+
+JOIN streaming.transaction_risk_events AS r
+    ON e.transaction_id = r.transaction_id
+
+WHERE r.risk_level = 'critical'
+
+ORDER BY r.risk_score DESC
+
+LIMIT 20
+""".strip()
+
+    # --------------------------------------------------
+    # LOCATION SUMMARY
+    # --------------------------------------------------
+
+    if (
+        "transactions by location" in q
+        or "transaction count by location" in q
+        or "locations" in q
+    ):
+        return """
+SELECT
+    location,
+    COUNT(*) AS transaction_count,
+    ROUND(AVG(amount), 2) AS average_amount
+
+FROM streaming.transaction_events
+
+GROUP BY location
+
+ORDER BY transaction_count DESC
+
+LIMIT 20
+""".strip()
+
+    # --------------------------------------------------
+    # PAYMENT METHOD SUMMARY
+    # --------------------------------------------------
+
+    if (
+        "payment methods" in q
+        or "transactions by payment method" in q
+        or "transaction count by payment" in q
+    ):
+        return """
+SELECT
+    payment_method,
+    COUNT(*) AS transaction_count,
+    ROUND(AVG(amount), 2) AS average_amount
+
+FROM streaming.transaction_events
+
+GROUP BY payment_method
+
+ORDER BY transaction_count DESC
+
+LIMIT 20
+""".strip()
+
+    # --------------------------------------------------
+    # MERCHANT CATEGORY SUMMARY
+    # --------------------------------------------------
+
+    if (
+        "merchant categories" in q
+        or "transactions by merchant category" in q
+        or "transaction count by category" in q
+    ):
+        return """
+SELECT
+    merchant_category,
+    COUNT(*) AS transaction_count,
+    ROUND(AVG(amount), 2) AS average_amount
+
+FROM streaming.transaction_events
+
+GROUP BY merchant_category
+
+ORDER BY transaction_count DESC
+
+LIMIT 20
+""".strip()
+
+    raise ValueError(
+        "I couldn't map that data question to a supported "
+        "database query. Try asking about transaction counts, "
+        "anomalies, risk levels, transaction amounts, recent "
+        "transactions, locations, payment methods, or merchant categories."
+    )
